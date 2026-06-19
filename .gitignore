@@ -1,0 +1,7 @@
+# Auto-generated TLS material
+remoteshell.crt
+remoteshell.key
+*.pem
+
+__pycache__/
+*.pyc
