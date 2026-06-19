@@ -106,9 +106,59 @@ Control characters work because the PTY is in cooked mode: sending the byte
 
 All endpoints except `GET /` require the `X-Auth-Token` header.
 
+## TLS
+
+Pass `--tls` to serve over HTTPS. If you don't supply `--cert`/`--key`, the
+server generates a self-signed certificate (with `openssl`) on first start
+and prints its **SHA-256 fingerprint**:
+
+```
+$ sudo ./remoteshell.py --password 's3cr3t' --tls
+TLS enabled. Pin this fingerprint on the client (--fingerprint):
+  sha256:fdf7e1aa4b59...231a3a3
+remoteshell listening on https://0.0.0.0:433 (shell=/bin/sh)
+```
+
+Because the certificate is self-signed there is no CA to trust. Instead of
+copying certificate files around, the client **pins that fingerprint**
+(Trust On First Use): you just give it the one string the server printed.
+
+## Client (`rsh-client.py`)
+
+A standalone, dependency-free Python 3 client — nothing to install on the
+client side, no certificate files. It verifies the server purely by the
+pinned fingerprint.
+
+```sh
+export REMOTESHELL_PASSWORD='s3cr3t'
+FP='sha256:fdf7e1aa4b59...231a3a3'   # printed by the server
+
+# one-shot command
+./rsh-client.py https://HOST:433 -f "$FP" exec 'ls -la /'
+
+# pipe data to the command's stdin
+echo data | ./rsh-client.py https://HOST:433 -f "$FP" exec 'wc -c'
+
+# fully interactive shell (raw local terminal, forwards Ctrl-C, resizes, ...)
+./rsh-client.py https://HOST:433 -f "$FP" shell
+```
+
+If you connect without `-f`/`--fingerprint`, the client refuses but prints
+the fingerprint it saw, so you can copy it and pin it on the next run. Use
+`-k`/`--insecure` to skip the check entirely (not recommended). Plain
+`http://` URLs also work (no TLS, no fingerprint).
+
+## Programmatic / agent access
+
+The full wire protocol (TLS pinning handshake, headers, endpoints, streaming,
+session lifecycle, status codes, and a recommended client algorithm) is
+specified in [`AGENT_SPEC.md`](AGENT_SPEC.md) — enough for an autonomous agent
+to implement a client without reading the server source.
+
 ## Security notes
 
 This tool runs arbitrary commands with the privileges of the user that
 launched it — only run it on hosts and networks you control, for legitimate
-remote administration. The password is sent in clear text over HTTP; put it
-behind TLS (e.g. a reverse proxy) or a trusted network if exposed.
+remote administration. Always use `--tls` (or a TLS-terminating reverse
+proxy) when the server is reachable beyond localhost: without it the
+password and all traffic travel in clear text.

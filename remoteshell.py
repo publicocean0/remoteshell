@@ -32,11 +32,13 @@ See README.md for client (curl) examples. All endpoints require the
 
 import argparse
 import fcntl
+import hashlib
 import hmac
 import json
 import os
 import pty
 import shutil
+import ssl
 import struct
 import subprocess
 import sys
@@ -211,6 +213,9 @@ class ShellHandler(BaseHTTPRequestHandler):
         if len(parts) == 3 and parts[0] == "session" and parts[2] == "input":
             self._session_input(parts[1])
             return
+        if len(parts) == 3 and parts[0] == "session" and parts[2] == "resize":
+            self._session_resize(parts[1])
+            return
         self._send_plain(404, "Not found.")
 
     def do_DELETE(self):
@@ -332,6 +337,21 @@ class ShellHandler(BaseHTTPRequestHandler):
             return
         self._send_plain(200, "ok")
 
+    def _session_resize(self, session_id):
+        sess = _lookup(session_id)
+        if sess is None:
+            self._send_plain(404, "No such session.")
+            return
+        try:
+            rows = int(self.headers.get("X-Rows", 0) or 0)
+            cols = int(self.headers.get("X-Cols", 0) or 0)
+            if rows and cols:
+                sess.set_winsize(rows, cols)
+        except (ValueError, OSError) as exc:
+            self._send_plain(400, "Resize failed: %s" % exc)
+            return
+        self._send_plain(200, "ok")
+
     def _session_output(self, session_id):
         sess = _lookup(session_id)
         if sess is None:
@@ -364,6 +384,32 @@ class ShellHandler(BaseHTTPRequestHandler):
     # Keep the default access logging (writes to stderr).
 
 
+def cert_fingerprint(cert_path):
+    """Return the SHA-256 fingerprint (hex) of a PEM certificate."""
+    with open(cert_path) as fh:
+        der = ssl.PEM_cert_to_DER_cert(fh.read())
+    return hashlib.sha256(der).hexdigest()
+
+
+def ensure_self_signed(cert_path, key_path, days):
+    """Generate a self-signed cert/key with openssl if they don't exist."""
+    if os.path.exists(cert_path) and os.path.exists(key_path):
+        return
+    if not shutil.which("openssl"):
+        raise SystemExit("openssl not found: provide --cert/--key or install openssl")
+    subprocess.run(
+        [
+            "openssl", "req", "-x509", "-newkey", "rsa:2048",
+            "-keyout", key_path, "-out", cert_path,
+            "-days", str(days), "-nodes", "-subj", "/CN=remoteshell",
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    os.chmod(key_path, 0o600)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Password-protected remote shell over HTTP.")
     parser.add_argument(
@@ -373,6 +419,10 @@ def main(argv=None):
     parser.add_argument("--host", default="0.0.0.0", help="Bind address (default: 0.0.0.0).")
     parser.add_argument("--port", type=int, default=433, help="Listen port (default: 433).")
     parser.add_argument("--shell", default="/bin/sh", help="Shell used to run commands (default: /bin/sh).")
+    parser.add_argument("--tls", action="store_true", help="Serve over HTTPS (TLS).")
+    parser.add_argument("--cert", default="remoteshell.crt", help="TLS certificate path (default: remoteshell.crt).")
+    parser.add_argument("--key", default="remoteshell.key", help="TLS private key path (default: remoteshell.key).")
+    parser.add_argument("--cert-days", type=int, default=365, help="Validity of an auto-generated cert (default: 365).")
     args = parser.parse_args(argv)
 
     global PASSWORD, SHELL
@@ -385,8 +435,22 @@ def main(argv=None):
         parser.error("shell not found: %s" % SHELL)
 
     server = ThreadingHTTPServer((args.host, args.port), ShellHandler)
+
+    scheme = "http"
+    if args.tls:
+        ensure_self_signed(args.cert, args.key, args.cert_days)
+        context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+        context.load_cert_chain(args.cert, args.key)
+        server.socket = context.wrap_socket(server.socket, server_side=True)
+        scheme = "https"
+        sys.stderr.write(
+            "TLS enabled. Pin this fingerprint on the client (--fingerprint):\n"
+            "  sha256:%s\n" % cert_fingerprint(args.cert)
+        )
+
     sys.stderr.write(
-        "remoteshell listening on %s:%d (shell=%s)\n" % (args.host, args.port, SHELL)
+        "remoteshell listening on %s://%s:%d (shell=%s)\n"
+        % (scheme, args.host, args.port, SHELL)
     )
     try:
         server.serve_forever()
