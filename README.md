@@ -155,6 +155,32 @@ session lifecycle, status codes, and a recommended client algorithm) is
 specified in [`AGENT_SPEC.md`](AGENT_SPEC.md) — enough for an autonomous agent
 to implement a client without reading the server source.
 
+### Embeddable SDK (`remoteshell_client.py`)
+
+For agents, `remoteshell_client.py` is a single-file, dependency-free module
+you can drop in and import. It pins the TLS fingerprint (no cert files) and
+captures the `X-Exit-Code` trailer, and offers expect/send primitives for
+driving interactive (prompting) commands.
+
+```python
+from remoteshell_client import RemoteShellClient
+
+rs = RemoteShellClient(
+    "https://host:433", password="s3cr3t",
+    fingerprint="sha256:fdf7e1aa...",     # printed by the server
+)
+
+# one-shot, with exit code
+res = rs.run("uname -a")
+print(res.output.decode(), res.exit_code)
+
+# interactive command that prompts the user
+with rs.open_session(command='python3 -c \'n=input("Name? "); print("Hi", n)\'') as sh:
+    sh.read_until("Name?", timeout=8)     # wait for the prompt
+    sh.send("Ada\n")                      # answer it
+    print(sh.read_until("Hi", timeout=8).decode())
+```
+
 ## Security notes
 
 This tool runs arbitrary commands with the privileges of the user that
